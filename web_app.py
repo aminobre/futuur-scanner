@@ -9,6 +9,7 @@ HTML = """
 <!doctype html>
 <html>
 <head>
+  <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Futuur Scanner</title>
   <style>
@@ -55,15 +56,15 @@ HTML = """
 
 @app.route("/")
 def index():
-    markets = get_markets()
-    recs = build_recommendations(markets)
-    return render_template_string(
-        HTML,
-        recs=recs,
-        bankroll=BANKROLL_USD,
-        risk_mode=RISK_MODE,
-    )
+  markets = get_markets()
+  recs = build_recommendations(markets)
+  return render_template_string(
+      HTML,
+      recs=recs,
+      bankroll=BANKROLL_USD,
+      risk_mode=RISK_MODE,
+  )
 
 if __name__ == "__main__":
-    # host=0.0.0.0 so your phone can reach it on LAN
-    app.run(host="0.0.0.0", port=8000)
+  # for local testing; default Flask port 5000
+  app.run()
