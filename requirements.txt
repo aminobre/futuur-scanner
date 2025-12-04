@@ -1,4 +1,4 @@
 flask
 requests
 gunicorn
-py-futuur-client
+py-futuur-client==1.0.0
