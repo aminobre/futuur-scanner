@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 from py_futuur_client.client import Client
 
 from models import Market
-from config import FUTUUR_PUBLIC_KEY, FUTUUR_PRIVATE_KEY, FUTUUR_BASE_URL
+from config import FUTUUR_PUBLIC_KEY, FUTUUR_PRIVATE_KEY
 
 
 def _client() -> Client:
@@ -16,10 +16,10 @@ def _client() -> Client:
             "Set them in your environment before calling Futuur."
         )
 
+    # IMPORTANT: no base_url kwarg here; let the library use its default.
     return Client(
         public_key=FUTUUR_PUBLIC_KEY,
         private_key=FUTUUR_PRIVATE_KEY,
-        base_url=FUTUUR_BASE_URL,
     )
 
 
