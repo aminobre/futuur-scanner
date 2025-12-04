@@ -3,9 +3,8 @@ from typing import List, Dict, Any
 from py_futuur_client.client import Client
 
 from models import Market
-from config import FUTUUR_PUBLIC_KEY, FUTUUR_PRIVATE_KEY
+from config import FUTUUR_PUBLIC_KEY, FUTUUR_PRIVATE_KEY, FUTUUR_BASE_URL
 
-# ---------- Futuur client wrapper ---------- #
 
 def _client() -> Client:
     """
@@ -20,11 +19,9 @@ def _client() -> Client:
     return Client(
         public_key=FUTUUR_PUBLIC_KEY,
         private_key=FUTUUR_PRIVATE_KEY,
+        base_url=FUTUUR_BASE_URL,
     )
 
-
-
-# ---------- filters and mapping ---------- #
 
 def _is_open_real_orderbook(m: Dict[str, Any]) -> bool:
     """
@@ -42,39 +39,46 @@ def _is_open_real_orderbook(m: Dict[str, Any]) -> bool:
     return True
 
 
-def _is_finance_crypto_reg(m: Dict[str, Any]) -> bool:
+def _infer_domain(m: Dict[str, Any]) -> str:
     """
-    Filter to markets you care about: crypto / macro / regulatory.
-    Uses tags and category.
+    Roughly classify a market into macro/crypto/reg, sports, entertainment, or other.
+    This is text-based only; tweak keywords as you see fit.
     """
-    tag_names = [t.get("name", "").lower() for t in m.get("tags", [])]
-
+    title = (m.get("title") or "").lower()
     cat = m.get("category") or {}
     cat_title = (cat.get("title") or "").lower()
     cat_slug = (cat.get("slug") or "").lower()
+    tags = " ".join((t.get("name") or "").lower() for t in m.get("tags", []))
 
-    text = " ".join(tag_names + [cat_title, cat_slug])
+    text = " ".join([title, cat_title, cat_slug, tags])
 
-    targets = (
-        "crypto",
-        "defi",
-        "bitcoin",
-        "ethereum",
-        "inflation",
-        "cpi",
-        "gdp",
-        "employment",
-        "jobs",
-        "interest",
-        "rate",
-        "regulation",
-        "regulatory",
-        "sec",
-        "fed",
-        "prediction markets",
+    sports_kw = (
+        "sports", "game", "match", "tournament", "league",
+        "nba", "nfl", "nhl", "mlb", "soccer", "football",
+        "tennis", "f1", "formula", "ufc", "fight", "world cup",
+    )
+    ent_kw = (
+        "oscar", "oscars", "emmy", "grammy", "bafta",
+        "movie", "box office", "film", "tv series", "season",
+        "netflix", "disney", "hbo", "series finale", "album",
+    )
+    macro_kw = (
+        "inflation", "cpi", "gdp", "unemployment", "jobs",
+        "interest rate", "fed", "federal reserve", "ecb", "central bank",
+        "recession", "growth", "economy", "economic",
+        "election", "president", "parliament", "congress",
+        "regulation", "regulatory", "sec", "court", "supreme court",
+        "crypto", "bitcoin", "btc", "ethereum", "eth", "defi",
+        "finance", "stock", "equity", "bond", "treasury",
     )
 
-    return any(t in text for t in targets)
+    if any(k in text for k in sports_kw):
+        return "sports"
+    if any(k in text for k in ent_kw):
+        return "entertainment"
+    if any(k in text for k in macro_kw):
+        return "macro"
+    return "other"
 
 
 def _extract_outcome_price(outcome: Dict[str, Any]) -> float | None:
@@ -125,8 +129,16 @@ def _map_outcome_to_market(m: Dict[str, Any], outcome: Dict[str, Any]) -> Market
         or m.get("resolve_date")
     )
 
+    created_at = m.get("created_on")
+    volume_real = float(m.get("volume_real_money", 0.0))
+
+    slug = m.get("slug")
+    url = f"https://futuur.com/markets/{slug}" if slug else None
+
     yes_price = price
     no_price = 1.0 - yes_price
+
+    domain = _infer_domain(m)
 
     return Market(
         id=str(composite_id),
@@ -136,23 +148,24 @@ def _map_outcome_to_market(m: Dict[str, Any], outcome: Dict[str, Any]) -> Market
         yes_price=yes_price,
         no_price=no_price,
         resolves_at=resolves_at,
+        created_at=created_at,
+        volume_real=volume_real,
+        url=url,
+        domain=domain,
         raw=m,
     )
 
 
-# ---------- public function used by main.py / web_app.py ---------- #
-
-def get_markets(limit: int = 100, offset: int = 0) -> List[Market]:
+def get_markets() -> List[Market]:
     """
     Fetch markets from Futuur via py_futuur_client and convert each outcome
     into a Market object.
 
-    For now we call .list() with no extra kwargs because the SDK
-    signature rejected 'ordering' (and maybe limit/offset).
+    Uses client.market.list(), which returns:
+      {'pagination': {...}, 'results': [ {...}, ... ]}
     """
     client = _client()
-    raw = client.market.list()  # <- no kwargs; this we know works
-
+    raw = client.market.list()
 
     results = raw.get("results") or []
     markets: List[Market] = []
@@ -162,9 +175,6 @@ def get_markets(limit: int = 100, offset: int = 0) -> List[Market]:
             continue
 
         if not _is_open_real_orderbook(m):
-            continue
-
-        if not _is_finance_crypto_reg(m):
             continue
 
         for outcome in m.get("outcomes") or []:

@@ -8,10 +8,14 @@ class Market:
     title: str
     category: str
     subcategory: Optional[str]
-    yes_price: float  # 0–1
-    no_price: float   # 0–1
-    resolves_at: Optional[str] = None
-    raw: Optional[Dict[str, Any]] = None  # full JSON if needed
+    yes_price: float        # 0–1
+    no_price: float         # 0–1
+    resolves_at: Optional[str] = None   # ISO datetime string
+    created_at: Optional[str] = None    # ISO datetime string
+    volume_real: float = 0.0            # real-money volume
+    url: Optional[str] = None           # direct Futuur URL
+    domain: str = "other"               # macro/sports/entertainment/other
+    raw: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -26,3 +30,12 @@ class Recommendation:
     half_frac: float   # half Kelly fraction
     limit: float       # limit price to post
     rationale: str
+
+    # metadata
+    category: str = ""
+    subcategory: Optional[str] = None
+    resolves_at: Optional[str] = None
+    created_at: Optional[str] = None
+    volume_real: float = 0.0
+    url: Optional[str] = None
+    domain: str = "other"

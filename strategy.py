@@ -1,23 +1,29 @@
 from typing import List
+
 from models import Market, Recommendation
 from config import BANKROLL_USD, EDGE_THRESHOLD, RISK_MODE
 
 
-def estimate_p(market: Market, s: float) -> float:
+def estimate_p(market: Market, s: float) -> tuple[float, str]:
     """
-    Stub p-estimator.
-    Right now:
-      - baseline 0.5
-      - longshot clamp for Yes <= 10% (to avoid over-belief)
-    Later you'll implement real heuristics for macro/crypto/regulatory.
+    Simple baseline p-estimator.
+    You will override this with CSV+ChatGPT 'p_final' externally.
+
+    For now:
+      - Start at 0.5 for all domains.
+      - Apply a longshot clamp for small s.
     """
+    # Domain-based tweaks can go here later if you want.
     p = 0.5
 
     # Longshot rule: Yes <= 10% -> usually No (cap p)
     if s <= 0.10 and p > 0.08:
         p = 0.08
+        reason = "Baseline 0.5 with longshot cap"
+    else:
+        reason = "Baseline 0.5"
 
-    return p
+    return p, reason
 
 
 def kelly_yes(p: float, s: float) -> float:
@@ -39,7 +45,7 @@ def build_recommendations(markets: List[Market]) -> List[Recommendation]:
 
     for m in markets:
         s = m.yes_price
-        p = estimate_p(m, s)
+        p, p_reason = estimate_p(m, s)
 
         edge_yes = p - s
         edge_no = s - p
@@ -61,7 +67,7 @@ def build_recommendations(markets: List[Market]) -> List[Recommendation]:
             side = "No"
             full_frac = f_no
 
-        # enforce minimum edge in percentage points
+        # enforce minimum edge in percentage points (pre-research proxy)
         if edge < EDGE_THRESHOLD:
             continue
 
@@ -79,10 +85,17 @@ def build_recommendations(markets: List[Market]) -> List[Recommendation]:
                 full_frac=full_frac,
                 half_frac=half_frac,
                 limit=limit,
-                rationale="Baseline p for demo",
+                rationale=p_reason,
+                category=m.category,
+                subcategory=m.subcategory,
+                resolves_at=m.resolves_at,
+                created_at=m.created_at,
+                volume_real=m.volume_real,
+                url=m.url,
+                domain=m.domain,
             )
         )
 
-    # sort by |edge| descending
+    # default order: sort by |edge| descending
     recs.sort(key=lambda r: abs(r.edge), reverse=True)
     return recs
