@@ -1,41 +1,88 @@
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class Market:
-    id: str
+    id: int
+    question_id: int
+    outcome_id: int
     title: str
-    category: str
-    subcategory: Optional[str]
-    yes_price: float        # 0–1
-    no_price: float         # 0–1
-    resolves_at: Optional[str] = None   # ISO datetime string
-    created_at: Optional[str] = None    # ISO datetime string
-    volume_real: float = 0.0            # real-money volume
-    url: Optional[str] = None           # direct Futuur URL
-    domain: str = "other"               # macro/sports/entertainment/other
-    raw: Optional[Dict[str, Any]] = None
+    outcome_title: str
+    slug: str
+    domain: str
+    category_title: str
+    tags: List[str]
+    is_binary: bool
+    s: float  # market-implied probability for this outcome (0–1)
+    price: float  # same as s, kept for clarity
+    volume_real: float
+    volume_play: float
+    wagers_count: int
+    bet_end: Optional[datetime]
+    days_to_close: Optional[float]
+    raw: Dict[str, Any] = field(repr=False, default_factory=dict)
 
 
 @dataclass
 class Recommendation:
-    market_id: str
-    title: str
-    s: float
-    p: float
-    edge: float
-    side: str          # "Yes" or "No"
-    full_frac: float   # full Kelly fraction of bankroll
-    half_frac: float   # half Kelly fraction
-    limit: float       # limit price to post
-    rationale: str
+    market: Market
+    side: str  # 'yes' or 'no'
+    s: float   # market price
+    p0: float  # pre-GPT probability
+    edge0: float  # p0 - s for chosen side (Yes: p0-s; No: s-p0)
+    kelly_full: float
+    kelly_half: float
+    limit: float
+    notes: str = ""
 
-    # metadata
-    category: str = ""
-    subcategory: Optional[str] = None
-    resolves_at: Optional[str] = None
-    created_at: Optional[str] = None
-    volume_real: float = 0.0
-    url: Optional[str] = None
-    domain: str = "other"
+
+@dataclass
+class BetRow:
+    id: int
+    status: str
+    status_display: str
+    market_id: int
+    market_title: str
+    market_slug: str
+    domain: str
+    category_title: str
+    outcome_id: int
+    outcome_title: str
+    position: str  # 'l' or 's'
+    currency: str
+    total_shares: float
+    avg_entry_price: Optional[float]
+    last_price: float
+    entry_notional: float
+    current_notional: float
+    realized_pnl: float
+    unrealized_pnl: float
+    realized_pct: Optional[float]
+    first_action_at: Optional[datetime]
+    last_action_at: Optional[datetime]
+    raw: Dict[str, Any] = field(repr=False, default_factory=dict)
+    pct_of_bankroll: Optional[float] = None
+
+
+@dataclass
+class LimitOrderRow:
+    order_id: int
+    market_title: str
+    outcome_title: str
+    domain: str
+    category_title: str
+    side: str  # 'bid' or 'ask'
+    position: str  # 'l' or 's'
+    price: float
+    shares_requested: float
+    shares_filled: float
+    remaining_shares: float
+    reserved_notional: float
+    status: str
+    created: Optional[datetime]
+    expires: Optional[datetime]
+    raw: Dict[str, Any] = field(repr=False, default_factory=dict)

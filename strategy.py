@@ -1,101 +1,146 @@
+from __future__ import annotations
+
 from typing import List
 
+from config import DEFAULT_RISK_MODE
 from models import Market, Recommendation
-from config import BANKROLL_USD, EDGE_THRESHOLD, RISK_MODE
 
 
-def estimate_p(market: Market, s: float) -> tuple[float, str]:
+EDGE_THRESHOLD = 0.02  # 2 percentage points
+
+
+def risk_mode_from_string(value: str | None) -> float:
+    if not value:
+        return risk_mode_from_string(DEFAULT_RISK_MODE)
+    v = value.lower()
+    if v.startswith("full"):
+        return 1.0
+    if v.startswith("half"):
+        return 0.5
+    # Fallback: conservative
+    return 0.5
+
+
+def _compute_pre_p(domain: str, s: float) -> float:
     """
-    Simple baseline p-estimator.
-    You will override this with CSV+ChatGPT 'p_final' externally.
-
-    For now:
-      - Start at 0.5 for all domains.
-      - Apply a longshot clamp for small s.
+    Heuristic pre-GPT probability estimate.
+    Simple and conservative; GPT updates refine it later.
     """
-    # Domain-based tweaks can go here later if you want.
-    p = 0.5
+    s = max(0.0001, min(0.9999, float(s)))
+    dom = (domain or "").lower()
 
-    # Longshot rule: Yes <= 10% -> usually No (cap p)
-    if s <= 0.10 and p > 0.08:
-        p = 0.08
-        reason = "Baseline 0.5 with longshot cap"
+    # Longshot Yes: default fade
+    if s <= 0.10:
+        return 0.04
+
+    # Overconfident Yes: shrink toward high 80s/low 90s
+    if s >= 0.90:
+        return 0.90
+
+    # Macro / science / fundamentals-heavy → keep closer to market
+    if any(k in dom for k in ("finance", "science")) and not any(
+        k in dom for k in ("sports", "entertainment", "politics")
+    ):
+        # Mild shrink toward 0.5
+        return 0.5 + 0.5 * (s - 0.5)
+
+    # Narrative-heavy domains → fade extremes a bit
+    p_raw = 0.5 + 0.3 * (s - 0.5)
+    if s > 0.65:
+        p_adj = p_raw - 0.10  # trim optimism
+    elif s < 0.35:
+        p_adj = p_raw + 0.10  # trim pessimism
     else:
-        reason = "Baseline 0.5"
+        p_adj = p_raw
 
-    return p, reason
+    return max(0.01, min(0.99, p_adj))
 
 
-def kelly_yes(p: float, s: float) -> float:
-    """Kelly fraction for betting Yes at price s (probability p)."""
+def _kelly_yes(p: float, s: float) -> float:
+    # Yes-side Kelly (from your spec)
     if p <= s or s >= 1.0:
         return 0.0
     return (p - s) / (1.0 - s)
 
 
-def kelly_no(p: float, s: float) -> float:
-    """Kelly fraction for betting No against Yes price s (probability p)."""
+def _kelly_no(p: float, s: float) -> float:
+    # No-side Kelly (from your spec)
     if p >= s or s <= 0.0:
         return 0.0
     return (s - p) / s
 
 
-def build_recommendations(markets: List[Market]) -> List[Recommendation]:
+def build_recommendations(
+    markets: List[Market],
+    bankroll: float,
+    risk_mode: str | None = None,
+) -> List[Recommendation]:
+    risk_fraction = risk_mode_from_string(risk_mode)
+
     recs: List[Recommendation] = []
 
     for m in markets:
-        s = m.yes_price
-        p, p_reason = estimate_p(m, s)
-
-        edge_yes = p - s
-        edge_no = s - p
-
-        f_yes = kelly_yes(p, s)
-        f_no = kelly_no(p, s)
-
-        # if neither side has positive Kelly, skip
-        if f_yes <= 0 and f_no <= 0:
+        s = m.s
+        if s <= 0.0 or s >= 1.0:
             continue
 
-        # pick the side with larger Kelly
-        if f_yes > f_no:
-            edge = edge_yes
-            side = "Yes"
-            full_frac = f_yes
+        p0 = _compute_pre_p(m.domain, s)
+
+        edge_yes = p0 - s
+        edge_no = s - p0
+
+        f_yes = _kelly_yes(p0, s)
+        f_no = _kelly_no(p0, s)
+
+        if f_yes <= 0.0 and f_no <= 0.0:
+            # Keep a record with zero Kelly so you still see the market, but it's not sized.
+            if abs(edge_yes) >= abs(edge_no):
+                side = "yes"
+                best_edge = edge_yes
+            else:
+                side = "no"
+                best_edge = edge_no
+            full_kelly = 0.0
         else:
-            edge = edge_no
-            side = "No"
-            full_frac = f_no
+            if f_yes >= f_no:
+                side = "yes"
+                best_edge = edge_yes
+                full_kelly = f_yes
+            else:
+                side = "no"
+                best_edge = edge_no
+                full_kelly = f_no
 
-        # enforce minimum edge in percentage points (pre-research proxy)
-        if edge < EDGE_THRESHOLD:
-            continue
+        # Filter tiny edges from being "recommended", but keep them in UI.
+        if abs(best_edge) < EDGE_THRESHOLD:
+            # Very small edge – treat as 0 for sizing purposes.
+            full_kelly = 0.0
 
-        half_frac = full_frac / 2.0
-        limit = s if side == "Yes" else (1.0 - s)
+        half_kelly = full_kelly * 0.5
+        # Risk mode applies as a global multiplier on the Kelly fraction.
+        full_kelly *= risk_fraction
+        half_kelly *= risk_fraction
+
+        notes = ""
+        if s <= 0.10:
+            notes = "Longshot fade baseline"
+        elif s >= 0.90:
+            notes = "Crowded favorite; trimmed p"
 
         recs.append(
             Recommendation(
-                market_id=m.id,
-                title=m.title,
-                s=s,
-                p=p,
-                edge=edge,
+                market=m,
                 side=side,
-                full_frac=full_frac,
-                half_frac=half_frac,
-                limit=limit,
-                rationale=p_reason,
-                category=m.category,
-                subcategory=m.subcategory,
-                resolves_at=m.resolves_at,
-                created_at=m.created_at,
-                volume_real=m.volume_real,
-                url=m.url,
-                domain=m.domain,
+                s=s,
+                p0=p0,
+                edge0=best_edge,
+                kelly_full=full_kelly,
+                kelly_half=half_kelly,
+                limit=s,
+                notes=notes,
             )
         )
 
-    # default order: sort by |edge| descending
-    recs.sort(key=lambda r: abs(r.edge), reverse=True)
+    # Sort by absolute edge descending by default
+    recs.sort(key=lambda r: abs(r.edge0), reverse=True)
     return recs
