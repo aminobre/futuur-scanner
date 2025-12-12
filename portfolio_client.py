@@ -11,8 +11,8 @@ from futuur_api_raw import call_api
 
 # ---------- date helpers ----------
 
+
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:
-    """Handle ISO strings with or without microseconds and Z suffix."""
     if not value:
         return None
     try:
@@ -31,10 +31,11 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
 def _fmt_dt(dt: Optional[datetime]) -> str:
     if not dt:
         return "-"
-    return dt.strftime("%b %d, %y %H:%M")  # e.g. Dec 06, 25 02:15
+    return dt.strftime("%b %d, %y %H:%M")
 
 
 # ---------- dataclasses ----------
+
 
 @dataclass
 class BetRow:
@@ -57,6 +58,7 @@ class BetRow:
     status: str  # 'open' or 'closed'
     created: Optional[datetime]
     closed: Optional[datetime]
+    close_date: Optional[datetime]  # question bet_end_date
 
     @property
     def side_display(self) -> str:
@@ -70,14 +72,18 @@ class BetRow:
     def closed_str(self) -> str:
         return _fmt_dt(self.closed)
 
+    @property
+    def close_date_str(self) -> str:
+        return _fmt_dt(self.close_date)
+
 
 @dataclass
 class LimitOrderRow:
     order_id: int
-    question: str          # title only
-    outcome: str           # title only
-    side: str              # 'bid' or 'ask'
-    position: str          # 'l' or 's'
+    question: str
+    outcome: str
+    side: str  # 'bid' or 'ask'
+    position: str  # 'l' or 's'
     price: float
     shares_requested: float
     shares_filled: float
@@ -99,8 +105,8 @@ class LimitOrderRow:
 
 # ---------- wallet / bankroll ----------
 
-def fetch_wallet_balance() -> Optional[float]:
-    """Best-effort real-money wallet balance in canonical currency (e.g. USDC)."""
+
+def _fetch_me() -> Optional[dict]:
     try:
         data = call_api("me/", params=None, method="GET", auth=True)
     except HTTPError as e:
@@ -110,40 +116,42 @@ def fetch_wallet_balance() -> Optional[float]:
         print(f"/me/ unexpected error: {e}")
         return None
 
-    if not isinstance(data, list) or not data:
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return None
+    return data[0]
+
+
+def fetch_wallet_balance() -> Optional[float]:
+    me = _fetch_me()
+    if me is None:
         return None
 
-    me = data[0]
     wallet = me.get("wallet") or {}
 
-    # 1) direct USDC
-    for key in ("USDC", "usdc"):
+    for key in ("USDC", "usdc", "USDT", "usdt"):
         if key in wallet:
             try:
                 return float(wallet[key])
             except Exception:
                 pass
 
-    # 2) nested dicts that may contain USDC
     for sub_key in ("real_money", "real", "canonical", "balances"):
         sub = wallet.get(sub_key)
         if isinstance(sub, dict):
-            for key in ("USDC", "usdc"):
+            for key in ("USDC", "usdc", "USDT", "usdt"):
                 if key in sub:
                     try:
                         return float(sub[key])
                     except Exception:
                         pass
 
-    # 3) generic numeric "total" style keys
-    for key in ("total_usdc", "total", "total_real"):
+    for key in ("total_usdc", "total_usdt", "total", "total_real"):
         if key in wallet:
             try:
                 return float(wallet[key])
             except Exception:
                 pass
 
-    # 4) last resort: first numeric value
     for v in wallet.values():
         try:
             return float(v)
@@ -155,9 +163,18 @@ def fetch_wallet_balance() -> Optional[float]:
 
 # ---------- common helpers ----------
 
+
 def _extract_outcome_price(outcome: dict) -> float:
     price_val = outcome.get("price")
     if isinstance(price_val, dict):
+        # Prefer USDT/USDC if present
+        for k in ("USDT", "USDC"):
+            if k in price_val:
+                try:
+                    return float(price_val[k])
+                except Exception:
+                    pass
+        # Otherwise first numeric
         for v in price_val.values():
             try:
                 return float(v)
@@ -176,10 +193,10 @@ def _map_bet(raw: dict, status_label: str) -> BetRow:
     category = q.get("category") or {}
 
     active_purchases = raw.get("active_purchases") or []
-
     total_amount = 0.0
     total_shares = 0.0
     currency = None
+
     for p in active_purchases:
         try:
             amt = float(p.get("amount", 0.0))
@@ -191,23 +208,21 @@ def _map_bet(raw: dict, status_label: str) -> BetRow:
         if not currency:
             currency = p.get("currency")
 
-    if total_shares > 0:
-        avg_price = total_amount / total_shares
-    else:
-        avg_price = 0.0
+    avg_price = (total_amount / total_shares) if total_shares else 0.0
 
     mark_price = _extract_outcome_price(outcome)
-    shares = max(total_shares, 0.0)
+
+    # IMPORTANT: keep sign for shorts.
+    shares = total_shares
     mark_value = shares * mark_price
-    unrealized_pnl = mark_value - total_amount if status_label == "open" else 0.0
 
-    # Realized PnL not available via this endpoint – keep at 0.0
-    realized_pnl = 0.0
+    unrealized_pnl = (mark_value - total_amount) if status_label == "open" else 0.0
+    realized_pnl = 0.0  # not available here
 
-    # use last_action.created with microseconds
     last_action = raw.get("last_action") or {}
     created = _parse_dt(last_action.get("created") or raw.get("created"))
     closed_dt = created if status_label == "closed" else None
+    close_date = _parse_dt(q.get("bet_end_date"))
 
     return BetRow(
         bet_id=raw.get("id"),
@@ -229,18 +244,15 @@ def _map_bet(raw: dict, status_label: str) -> BetRow:
         status=status_label,
         created=created,
         closed=closed_dt,
+        close_date=close_date,
     )
 
 
 # ---------- open / closed bets ----------
 
+
 def list_open_real_bets(limit: int = 200, offset: int = 0) -> Tuple[List[BetRow], Optional[str]]:
-    params = {
-        "currency_mode": "real_money",
-        "active": True,
-        "limit": limit,
-        "offset": offset,
-    }
+    params = {"currency_mode": "real_money", "active": True, "limit": limit, "offset": offset}
     try:
         data = call_api("bets/", params=params, method="GET", auth=True)
     except HTTPError as e:
@@ -258,12 +270,7 @@ def list_open_real_bets(limit: int = 200, offset: int = 0) -> Tuple[List[BetRow]
 
 
 def list_closed_real_bets(limit: int = 200, offset: int = 0) -> Tuple[List[BetRow], Optional[str]]:
-    params = {
-        "currency_mode": "real_money",
-        "past_bets": True,
-        "limit": limit,
-        "offset": offset,
-    }
+    params = {"currency_mode": "real_money", "past_bets": True, "limit": limit, "offset": offset}
     try:
         data = call_api("bets/", params=params, method="GET", auth=True)
     except HTTPError as e:
@@ -280,90 +287,138 @@ def list_closed_real_bets(limit: int = 200, offset: int = 0) -> Tuple[List[BetRo
     return rows, None
 
 
-# ---------- open limit orders ----------
+# ---------- open limit orders (THIS FIXES YOUR ISSUE) ----------
+
 
 def list_open_limit_orders(limit: int = 200, offset: int = 0) -> Tuple[List[LimitOrderRow], Optional[str]]:
     """
-    Return open/partial user limit orders from /orders/.
-
-    We expect question and outcome to be nested objects; we store their titles.
-    Reserved notional = price * remaining_shares for bid orders.
+    Robust: try several endpoints. Only accept results that *look* user-scoped.
+    If the response looks like a global order book, DO NOT display it.
     """
-    params = {
+
+    base_params = {
         "currency_mode": "real_money",
         "status": "open",
         "limit": limit,
         "offset": offset,
-        "currency": "USDC",
+        # IMPORTANT: do NOT filter currency unless you know your orders are only that currency.
+        # Your sample orders were currency=USDT.
     }
-    try:
-        data = call_api("orders/", params=params, method="GET", auth=True)
-    except HTTPError as e:
-        return [], f"Error fetching open limit orders: {e}"
-    except Exception as e:
-        return [], f"Unexpected error fetching open limit orders: {e}"
 
-    rows: List[LimitOrderRow] = []
-    for raw in data.get("results", []):
+    # These are guesses; Futuur may only support some of them.
+    candidate_endpoints = [
+        ("orders/", base_params),
+        ("orders/me/", base_params),
+        ("me/orders/", base_params),
+        ("orders/", {**base_params, "mine": "true"}),
+        ("orders/", {**base_params, "only_mine": "true"}),
+        ("orders/", {**base_params, "owner": "me"}),
+        ("orders/", {**base_params, "user": "me"}),
+    ]
+
+    def looks_global(data: object) -> bool:
+        """
+        Heuristic: global books are huge.
+        User order lists are usually small (dozens, maybe a few hundred).
+        """
+        if not isinstance(data, dict):
+            return False
+
+        pag = data.get("pagination") or {}
+        total = None
+
+        if isinstance(pag, dict) and "total" in pag:
+            try:
+                total = int(pag["total"])
+            except Exception:
+                total = None
+
+        if total is None and "count" in data:
+            try:
+                total = int(data["count"])
+            except Exception:
+                total = None
+
+        results = data.get("results") or []
+        n = len(results) if isinstance(results, list) else 0
+
+        # Hard guardrails:
+        # - if total is massive, it's global.
+        # - if we got near-full pages repeatedly and total missing, also likely global.
+        if total is not None and total > 500:
+            return True
+
+        # If the response is giving you hundreds of open orders consistently, it’s probably not “just you”.
+        if total is None and n >= 300:
+            return True
+
+        return False
+
+    errors: List[str] = []
+
+    for endpoint, params in candidate_endpoints:
         try:
-            q = raw.get("question") or {}
-            o = raw.get("outcome") or {}
-
-            # Title extraction – avoid dumping the dict
-            if isinstance(q, dict):
-                question_title = q.get("title") or ""
-            elif isinstance(q, str):
-                question_title = q
-            else:
-                question_title = str(q) if q is not None else ""
-
-            if isinstance(o, dict):
-                outcome_title = o.get("title") or ""
-            elif isinstance(o, str):
-                outcome_title = o
-            else:
-                outcome_title = str(o) if o is not None else ""
-
-            # price may already be float
-            price_raw = raw.get("price", 0.0)
-            try:
-                price = float(price_raw)
-            except Exception:
-                price = 0.0
-
-            shares_req_raw = raw.get("shares_requested", raw.get("shares", 0.0))
-            try:
-                shares_req = float(shares_req_raw)
-            except Exception:
-                shares_req = 0.0
-
-            shares_filled_raw = raw.get("shares_filled", 0.0)
-            try:
-                shares_filled = float(shares_filled_raw)
-            except Exception:
-                shares_filled = 0.0
-
-            remaining = max(shares_req - shares_filled, 0.0)
-            reserved_notional = price * remaining if (raw.get("side") or "").lower() == "bid" else 0.0
-
-            rows.append(
-                LimitOrderRow(
-                    order_id=raw.get("id"),
-                    question=question_title,
-                    outcome=outcome_title,
-                    side=raw.get("side") or "",
-                    position=raw.get("position") or "",
-                    price=price,
-                    shares_requested=shares_req,
-                    shares_filled=shares_filled,
-                    remaining_shares=remaining,
-                    reserved_notional=reserved_notional,
-                    currency=raw.get("currency") or "",
-                    status=raw.get("status") or "",
-                    created=_parse_dt(raw.get("created")),
-                    expired_at=_parse_dt(raw.get("expired_at")),
-                )
-            )
+            data = call_api(endpoint, params=params, method="GET", auth=True)
         except Exception as e:
-            print(f"Error mapping limit order {raw.get('id')}: {e}")
-    return rows, None
+            errors.append(f"{endpoint}: {e}")
+            continue
+
+        # Normalize results
+        if isinstance(data, dict):
+            results = data.get("results") or []
+        elif isinstance(data, list):
+            results = data
+        else:
+            errors.append(f"{endpoint}: unexpected response type {type(data)}")
+            continue
+
+        if looks_global(data):
+            # reject and continue trying others
+            errors.append(f"{endpoint}: looks like GLOBAL order book (rejected)")
+            continue
+
+        # Map rows
+        rows: List[LimitOrderRow] = []
+        for raw in results:
+            try:
+                q = raw.get("question") or {}
+                o = raw.get("outcome") or {}
+
+                question_title = q.get("title") if isinstance(q, dict) else (q or "")
+                outcome_title = o.get("title") if isinstance(o, dict) else (o or "")
+
+                price = float(raw.get("price") or 0.0)
+                shares_req = float(raw.get("shares_requested", raw.get("shares", 0.0)) or 0.0)
+                shares_filled = float(raw.get("shares_filled") or 0.0)
+                remaining = max(shares_req - shares_filled, 0.0)
+
+                side = (raw.get("side") or "").lower()
+                reserved_notional = price * remaining if side == "bid" else 0.0
+
+                rows.append(
+                    LimitOrderRow(
+                        order_id=raw.get("id"),
+                        question=str(question_title or ""),
+                        outcome=str(outcome_title or ""),
+                        side=raw.get("side") or "",
+                        position=raw.get("position") or "",
+                        price=price,
+                        shares_requested=shares_req,
+                        shares_filled=shares_filled,
+                        remaining_shares=remaining,
+                        reserved_notional=reserved_notional,
+                        currency=raw.get("currency") or "",
+                        status=raw.get("status") or "",
+                        created=_parse_dt(raw.get("created")),
+                        expired_at=_parse_dt(raw.get("expired_at")),
+                    )
+                )
+            except Exception as e:
+                errors.append(f"{endpoint}: map error on order {raw.get('id')}: {e}")
+
+        # Accepted endpoint.
+        return rows, None
+
+    # If we got here, we refused to show global or all endpoints failed.
+    msg = " | ".join(errors[-6:]) if errors else "Could not fetch user open limit orders"
+    return [], f"Unable to load YOUR open limit orders safely (refused to display global book). Details: {msg}"

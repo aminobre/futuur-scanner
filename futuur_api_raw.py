@@ -9,12 +9,14 @@ import requests
 
 from config import FUTUUR_BASE_URL, FUTUUR_PUBLIC_KEY, FUTUUR_PRIVATE_KEY
 
-
 Json = Union[Dict[str, Any], list]
 
 
 def build_signature(params: Dict[str, Any]) -> Dict[str, Any]:
-    """Build SHA-512 HMAC signature from params. Requires 'Timestamp' in params."""
+    """
+    Build SHA-512 HMAC signature from params. Requires 'Timestamp' in params.
+    IMPORTANT: params must match exactly what Futuur expects to be signed.
+    """
     params_to_sign = OrderedDict(sorted(list(params.items())))
     encoded_params = urlencode(params_to_sign).encode("utf-8")
     encoded_private_key = FUTUUR_PRIVATE_KEY.encode("utf-8")
@@ -39,14 +41,15 @@ def call_api(
     payload: Optional[Dict[str, Any]] = None,
     method: str = "GET",
     auth: bool = True,
+    timeout: int = 30,
 ) -> Json:
     """
     Low-level helper around Futuur public API.
 
-    - endpoint: e.g. "markets/" or "bets/" (with or without leading slash).
+    - endpoint: "markets/" or "bets/" (with or without leading slash).
     - params: query parameters.
     - payload: JSON body for POST/PUT/PATCH.
-    - auth: if True, send Key/Timestamp/HMAC headers.
+    - auth: if True, send Key/Timestamp/HMAC headers and include Key/Timestamp in the correct place.
     """
     method = method.upper()
     base_url = FUTUUR_BASE_URL.rstrip("/") + "/"
@@ -56,37 +59,41 @@ def call_api(
     params = dict(params or {})
     payload = dict(payload or {})
 
-    if auth:
-        # Build the set of parameters to sign (either query or payload).
-        sign_params: Dict[str, Any] = dict(params or payload)
-        now_ts = int(datetime.datetime.utcnow().timestamp())
-        sign_params.setdefault("Key", FUTUUR_PUBLIC_KEY)
-        sign_params.setdefault("Timestamp", now_ts)
+    headers: Dict[str, str] = {}
 
-        # Apply Key/Timestamp back to params/payload depending on method.
+    if auth:
+        now_ts = int(datetime.datetime.utcnow().timestamp())
+
+        # Futuur expects Key/Timestamp signed along with the actual parameters.
+        # SIGNING RULE:
+        # - For GET: sign query params (+ Key/Timestamp), and also include Key/Timestamp in query.
+        # - For POST/PUT/PATCH: sign payload (+ Key/Timestamp), and include Key/Timestamp in payload.
         if method == "GET":
+            sign_params = dict(params)
+            sign_params.setdefault("Key", FUTUUR_PUBLIC_KEY)
+            sign_params.setdefault("Timestamp", now_ts)
+
+            # ensure query contains what we signed
             params.setdefault("Key", sign_params["Key"])
             params.setdefault("Timestamp", sign_params["Timestamp"])
         else:
+            sign_params = dict(payload)
+            sign_params.setdefault("Key", FUTUUR_PUBLIC_KEY)
+            sign_params.setdefault("Timestamp", now_ts)
+
             payload.setdefault("Key", sign_params["Key"])
             payload.setdefault("Timestamp", sign_params["Timestamp"])
 
         headers = build_headers(sign_params)
-    else:
-        headers = {}
 
-    url_params = "?" + urlencode(params) if params else ""
-    full_url = url + url_params
-
-    request_kwargs: Dict[str, Any] = {
-        "method": method,
-        "url": full_url,
-        "headers": headers,
-    }
-    if method in {"POST", "PUT", "PATCH"} and payload:
-        request_kwargs["json"] = payload
-
-    resp = requests.request(**request_kwargs)
+    resp = requests.request(
+        method=method,
+        url=url,
+        params=params if params else None,   # let requests encode
+        json=payload if (method in {"POST", "PUT", "PATCH"} and payload) else None,
+        headers=headers,
+        timeout=timeout,
+    )
     resp.raise_for_status()
 
     text = resp.text.strip()
