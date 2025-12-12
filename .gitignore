@@ -1,0 +1,19 @@
+﻿# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Binaries
+ngrok.exe
+*.zip
