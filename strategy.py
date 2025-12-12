@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import List
 
-from config import DEFAULT_RISK_MODE
+try:
+    # Preferred: user-configurable default
+    from config import DEFAULT_RISK_MODE  # type: ignore
+except Exception:
+    # Safe fallback if config.py doesn't define it yet
+    DEFAULT_RISK_MODE = "half"
+
+
 from models import Market, Recommendation
 
 
@@ -10,9 +17,7 @@ EDGE_THRESHOLD = 0.02  # 2 percentage points
 
 
 def risk_mode_from_string(value: str | None) -> float:
-    if not value:
-        return risk_mode_from_string(DEFAULT_RISK_MODE)
-    v = value.lower()
+    v = (value or DEFAULT_RISK_MODE or "half").lower()
     if v.startswith("full"):
         return 1.0
     if v.startswith("half"):
@@ -72,9 +77,13 @@ def _kelly_no(p: float, s: float) -> float:
 
 def build_recommendations(
     markets: List[Market],
-    bankroll: float,
+    bankroll: float | None = None,  # optional for backward compatibility
     risk_mode: str | None = None,
 ) -> List[Recommendation]:
+    # bankroll currently not used (recommendations are Kelly fractions),
+    # but kept in the signature so callers can pass it without breaking.
+    _ = bankroll
+
     risk_fraction = risk_mode_from_string(risk_mode)
 
     recs: List[Recommendation] = []
@@ -113,7 +122,6 @@ def build_recommendations(
 
         # Filter tiny edges from being "recommended", but keep them in UI.
         if abs(best_edge) < EDGE_THRESHOLD:
-            # Very small edge – treat as 0 for sizing purposes.
             full_kelly = 0.0
 
         half_kelly = full_kelly * 0.5

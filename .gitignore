@@ -17,3 +17,16 @@ __pycache__/
 # Binaries
 ngrok.exe
 *.zip
+
+# Local secrets
+.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Binaries
+ngrok.exe
+*.zip
