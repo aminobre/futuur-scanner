@@ -414,7 +414,6 @@ def _pmap_from_request() -> Dict[str, float]:
 def _market_p_win_for_position(position: str, outcome_price: float) -> float:
     s = clamp01(outcome_price)
     pos = (position or "l").lower()
-    # For a SHORT on an outcome, win-prob is (1 - outcome_price)
     return s if pos == "l" else (1.0 - s)
 
 
@@ -428,10 +427,6 @@ def _calc_open_bets(open_bets, pmap: Dict[str, float]) -> Tuple[List[Dict[str, A
     for b in open_bets:
         mkt_p_win = _market_p_win_for_position(b.position, b.mark_price)
 
-        # user p(win) priority:
-        # 1) pmap[bet_id] (from paste/localstorage submit)
-        # 2) legacy p_{bet_id} param (manual)
-        # 3) default market p(win)
         p_user = None
         if str(b.bet_id) in pmap:
             p_user = pmap[str(b.bet_id)]
@@ -448,8 +443,11 @@ def _calc_open_bets(open_bets, pmap: Dict[str, float]) -> Tuple[List[Dict[str, A
         mv_value = float(b.mark_value)  # already signed from portfolio_client
         ev_value = float(b.shares) * p_user  # shares signed
         ev_edge = ev_value - mv_value
-
         unrealized_calc = mv_value - float(b.amount_invested)
+
+        delta_p = float(p_user) - float(mkt_p_win)
+        abs_delta_p = abs(delta_p)
+
         mv_port += mv_value
         ev_port += ev_value
         total_unrealized += unrealized_calc
@@ -467,6 +465,8 @@ def _calc_open_bets(open_bets, pmap: Dict[str, float]) -> Tuple[List[Dict[str, A
                 "mark_price": float(b.mark_price),
                 "market_p_win": float(mkt_p_win),
                 "p_input": float(p_user),
+                "delta_p": float(delta_p),
+                "abs_delta_p": float(abs_delta_p),
                 "mv_value": float(mv_value),
                 "ev_value": float(ev_value),
                 "ev_edge": float(ev_edge),
@@ -504,8 +504,14 @@ def portfolio() -> str:
     total_exposure = mv_port + reserved_notional
     total_realized = 0.0
 
-    # Sorting
-    sort_open = request.args.get("sort_open") or "value"
+    # disagreement threshold
+    dp_thresh = 0.05
+
+    # Top 5 conviction differences by |Δp|
+    top5 = sorted(open_rows, key=lambda r: r.get("abs_delta_p", 0.0), reverse=True)[:5]
+
+    # Sorting controls
+    sort_open = request.args.get("sort_open") or "mv_value"
     dir_open = request.args.get("dir_open") or "desc"
     sort_closed = request.args.get("sort_closed") or "closed"
     dir_closed = request.args.get("dir_closed") or "desc"
@@ -523,7 +529,7 @@ def portfolio() -> str:
         params[dkey] = new_dir
         return url_for("portfolio", **params)
 
-    open_rows_sorted = _sort_rows(open_rows, sort_open, dir_open)
+    open_bets_sorted = _sort_rows(open_rows, sort_open, dir_open)
 
     open_orders_rows = []
     for o in open_orders:
@@ -577,24 +583,39 @@ def portfolio() -> str:
       .nav-links { display:flex; gap:12px; align-items:center; }
       .nav-links a { padding:6px 10px; border-radius:6px; }
       .nav-links a.active { background:#111827; color:#e5e7eb; }
+
       table { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
       th, td { padding:6px 8px; border-bottom:1px solid #111827; vertical-align:top; }
       th { text-align:left; font-size:11px; color:#9ca3af; white-space:nowrap; }
       th a { color:inherit; }
       tr:hover { background:#0b1220; }
+
       .stat-bar { display:flex; flex-wrap:wrap; gap:16px; font-size:12px; margin-bottom:10px; color:#9ca3af; }
       .stat-bar span.value { color:#e5e7eb; font-weight:500; }
+
       .pill { display:inline-block; padding:2px 6px; border-radius:999px; font-size:10px; }
       .pill.gain { background:#064e3b; color:#4ade80; }
       .pill.loss { background:#7f1d1d; color:#fecaca; }
+
+      .dp { font-variant-numeric: tabular-nums; }
+      .dp.good { color:#22c55e; }
+      .dp.bad { color:#f97316; }
+      .dp.big { font-weight:700; text-decoration: underline; }
+
       button { padding:6px 10px; border-radius:4px; border:none; background:#2563eb; color:white; font-size:13px; cursor:pointer; }
       button.secondary { background:#111827; border:1px solid #374151; }
+
       input.num { padding:4px 6px; border-radius:4px; border:1px solid #374151; background:#020617; color:#e5e7eb; width:110px; }
       input.p { width:78px; }
+
       textarea { background:#020617; color:#e5e7eb; border:1px solid #374151; border-radius:6px; padding:8px; }
       .error { color:#f97316; font-size:11px; margin-top:4px; }
       .muted { color:#6b7280; }
       .mini { color:#94a3b8; font-size:11px; }
+
+      .panel { border:1px solid #111827; background:#050b18; border-radius:10px; padding:10px; margin-top:10px; }
+      .panel h3 { margin:0 0 8px 0; font-size:12px; color:#cbd5e1; }
+      .panel table { margin-top:0; }
     </style>
   </head>
   <body>
@@ -603,14 +624,13 @@ def portfolio() -> str:
         <a href="{{ url_for('index') }}">Markets</a>
         <a href="{{ url_for('portfolio') }}" class="active">Portfolio</a>
       </div>
-      <div style="display:flex; align-items:center; gap:10px;">
-        <span class="muted" style="font-size:11px;">Export uses saved/pasted pmap (after Apply).</span>
+      <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <button type="button" id="copyPromptBtn" class="secondary">Copy ChatGPT prompt</button>
         <a href="{{ url_for('export_portfolio_csv', **request_args) }}"><button type="button">Export CSV</button></a>
       </div>
     </header>
 
     <main>
-      <!-- IMPORTANT: One form that actually wraps the p inputs -->
       <form method="get" action="{{ url_for('portfolio') }}" id="portForm">
         <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
           <label style="font-size:11px; color:#9ca3af;">
@@ -625,11 +645,12 @@ def portfolio() -> str:
           <input type="hidden" name="sort_orders" value="{{ sort_orders }}">
           <input type="hidden" name="dir_orders" value="{{ dir_orders }}">
 
-          <!-- pmap injected by JS on submit -->
           <input type="hidden" name="pmap" id="pmap_field" value="{}">
 
           <span class="mini">
-            Bankroll source: {{ bankroll_source }}{% if wallet_balance is not none %} (wallet ~ {{ '%.2f' % wallet_balance }}){% endif %} | Cash used for totals: {{ cash_source }}
+            Bankroll source: {{ bankroll_source }}{% if wallet_balance is not none %} (wallet ~ {{ '%.2f' % wallet_balance }}){% endif %}
+            | Cash used for totals: {{ cash_source }}
+            | Highlight threshold |Δp| ≥ {{ '%.2f' % dp_thresh }}
           </span>
 
           <button type="submit" class="secondary">Apply</button>
@@ -637,7 +658,7 @@ def portfolio() -> str:
 
         <div style="margin-top:12px;">
           <strong>Your p (ChatGPT paste)</strong>
-          <div class="mini">Paste JSON: { "6130248": 0.62, "6130256": 0.41 }</div>
+          <div class="mini">Paste JSON: { "6130248": 0.62, "6130256": 0.41 } or { "pmap": { ... } }</div>
           <textarea id="pmapPaste" rows="6" style="width:100%;"></textarea>
           <div style="margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;">
             <button type="button" id="validateP" class="secondary">Validate</button>
@@ -667,22 +688,55 @@ def portfolio() -> str:
         {% if closed_err %}<div class="error">Closed bets error: {{ closed_err }}</div>{% endif %}
         {% if orders_err %}<div class="error">Limit orders error: {{ orders_err }}</div>{% endif %}
 
-        <h2>Open positions ({{ open_bets_sorted|length }})</h2>
-        <div class="muted" style="font-size:11px; margin-bottom:6px;">
-          p inputs are treated as <b>P(win for the position)</b>. Shorts default to 1 - outcome price.
+        <div class="panel">
+          <h3>Top 5 conviction differences (by |Δp|)</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>bet_id</th>
+                <th>Market</th>
+                <th>Outcome</th>
+                <th>Mkt p(win)</th>
+                <th>Your p(win)</th>
+                <th>Δp</th>
+                <th>EV-MV</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in top5 %}
+                <tr>
+                  <td>{{ r.bet_id }}</td>
+                  <td>{{ r.question_title }}</td>
+                  <td>{{ r.outcome_title }}</td>
+                  <td>{{ '%.3f' % r.market_p_win }}</td>
+                  <td>{{ '%.3f' % r.p_input }}</td>
+                  {% set big = (r.abs_delta_p >= dp_thresh) %}
+                  {% set cls = "dp " + ("good" if r.delta_p>0 else ("bad" if r.delta_p<0 else "")) + (" big" if big else "") %}
+                  <td class="{{ cls }}">{{ '%+.3f' % r.delta_p }}</td>
+                  <td class="{% if r.ev_edge >= 0 %}pill gain{% else %}pill loss{% endif %}">{{ '%.2f' % r.ev_edge }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
 
-        <table>
+        <h2>Open positions ({{ open_bets_sorted|length }})</h2>
+        <div class="muted" style="font-size:11px; margin-bottom:6px;">
+          Inputs are <b>P(win for the position)</b>. Shorts default to <b>1 - outcome price</b>.
+        </div>
+
+        <table id="openPositionsTable">
           <thead>
             <tr>
               <th><a href="{{ sort_url('open','question_title') }}">Market</a></th>
               <th>Outcome</th>
               <th>Side</th>
               <th><a href="{{ sort_url('open','amount_invested') }}">Amount in</a></th>
-              <th>Shares</th>
+              <th><a href="{{ sort_url('open','shares') }}">Shares</a></th>
               <th>Avg price</th>
               <th>Mkt p(win)</th>
               <th>Your p(win)</th>
+              <th><a href="{{ sort_url('open','delta_p') }}">Δp</a></th>
               <th><a href="{{ sort_url('open','mv_value') }}">MV value</a></th>
               <th><a href="{{ sort_url('open','ev_value') }}">EV value</a></th>
               <th><a href="{{ sort_url('open','ev_edge') }}">EV-MV</a></th>
@@ -693,20 +747,23 @@ def portfolio() -> str:
           </thead>
           <tbody>
             {% for b in open_bets_sorted %}
-            <tr data-betid="{{ b.bet_id }}">
+            {% set big = (b.abs_delta_p >= dp_thresh) %}
+            {% set cls = "dp " + ("good" if b.delta_p>0 else ("bad" if b.delta_p<0 else "")) + (" big" if big else "") %}
+            <tr data-betid="{{ b.bet_id }}" data-title="{{ b.question_title|e }}" data-outcome="{{ b.outcome_title|e }}" data-mktp="{{ '%.6f' % b.market_p_win }}" data-closedate="{{ b.close_date_str|e }}" data-created="{{ b.created_str|e }}" data-side="{{ b.side_display|e }}">
               <td>{{ b.question_title }}</td>
               <td>{{ b.outcome_title }}</td>
               <td>{{ b.side_display }}</td>
               <td>{{ '%.2f' % b.amount_invested }}</td>
               <td>{{ '%.2f' % b.shares }}</td>
               <td>{{ '%.2f' % b.avg_price }}</td>
-              <td>{{ '%.3f' % b.market_p_win }}</td>
+              <td class="mktp">{{ '%.3f' % b.market_p_win }}</td>
               <td>
                 <input class="num p pInput" type="number" step="0.001" min="0" max="1" name="p_{{ b.bet_id }}" value="{{ '%.3f' % b.p_input }}">
               </td>
+              <td class="{{ cls }} dpCell">{{ '%+.3f' % b.delta_p }}</td>
               <td>{{ '%.2f' % b.mv_value }}</td>
-              <td>{{ '%.2f' % b.ev_value }}</td>
-              <td class="{% if b.ev_edge >= 0 %}pill gain{% else %}pill loss{% endif %}">{{ '%.2f' % b.ev_edge }}</td>
+              <td class="evCell">{{ '%.2f' % b.ev_value }}</td>
+              <td class="{% if b.ev_edge >= 0 %}pill gain{% else %}pill loss{% endif %} evEdgeCell">{{ '%.2f' % b.ev_edge }}</td>
               <td class="{% if b.unrealized_calc >= 0 %}pill gain{% else %}pill loss{% endif %}">{{ '%.2f' % b.unrealized_calc }}</td>
               <td>{{ b.close_date_str }}</td>
               <td>{{ b.created_str }}</td>
@@ -786,6 +843,7 @@ def portfolio() -> str:
 
       <script>
         const STORAGE_KEY = "pmap";
+        const DP_THRESH = {{ dp_thresh|tojson }};
 
         function loadPMap() {
           try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); }
@@ -802,7 +860,6 @@ def portfolio() -> str:
         const pasteEl = document.getElementById("pmapPaste");
 
         function normalizePMap(obj) {
-          // Accept {pmap:{...}} or {...}
           if (obj && typeof obj === "object" && obj.pmap && typeof obj.pmap === "object") obj = obj.pmap;
           const out = {};
           for (const k in obj) {
@@ -810,6 +867,25 @@ def portfolio() -> str:
             if (!isNaN(v)) out[String(k)] = clamp01(v);
           }
           return out;
+        }
+
+        function updateRowDerived(tr) {
+          const betId = tr.dataset.betid;
+          const inp = tr.querySelector(".pInput");
+          const mktp = Number(tr.dataset.mktp);
+          if (!inp || isNaN(mktp)) return;
+
+          const yourp = clamp01(Number(inp.value));
+          const dp = yourp - mktp;
+
+          const dpCell = tr.querySelector(".dpCell");
+          if (dpCell) {
+            dpCell.textContent = (dp >= 0 ? "+" : "") + dp.toFixed(3);
+            dpCell.classList.remove("good","bad","big");
+            if (dp > 0) dpCell.classList.add("good");
+            if (dp < 0) dpCell.classList.add("bad");
+            if (Math.abs(dp) >= DP_THRESH) dpCell.classList.add("big");
+          }
         }
 
         function applyPMapToTable(pmap) {
@@ -820,6 +896,7 @@ def portfolio() -> str:
             if (!inp) return;
             if (pmap[betId] !== undefined) {
               inp.value = pmap[betId];
+              updateRowDerived(tr);
               applied++;
             } else {
               ignored++;
@@ -835,7 +912,7 @@ def portfolio() -> str:
           applyPMapToTable(stored);
         }
 
-        // When user manually edits any p input, update storage
+        // When user manually edits any p input, update storage + derived Δp instantly
         document.querySelectorAll("tr[data-betid]").forEach(tr => {
           const betId = tr.dataset.betid;
           const inp = tr.querySelector(".pInput");
@@ -847,6 +924,7 @@ def portfolio() -> str:
               p[betId] = clamp01(v);
               savePMap(p);
               pasteEl.value = JSON.stringify(p, null, 2);
+              updateRowDerived(tr);
             }
           });
         });
@@ -855,7 +933,6 @@ def portfolio() -> str:
           try {
             const obj = JSON.parse(pasteEl.value);
             const p = normalizePMap(obj);
-            // basic validation
             for (const k in p) {
               const v = Number(p[k]);
               if (isNaN(v) || v < 0 || v > 1) throw `Invalid p for ${k}`;
@@ -892,6 +969,7 @@ def portfolio() -> str:
           localStorage.removeItem(STORAGE_KEY);
           pasteEl.value = "";
           document.querySelectorAll(".pInput").forEach(inp => inp.value = "");
+          document.querySelectorAll("tr[data-betid]").forEach(tr => updateRowDerived(tr));
           statusEl.textContent = "Cleared";
         };
 
@@ -900,6 +978,71 @@ def portfolio() -> str:
           const p = loadPMap();
           document.getElementById("pmap_field").value = JSON.stringify(p);
         });
+
+        // Build CSV from current open positions table and copy prompt
+        function buildCSVFromTable() {
+          const rows = [];
+          rows.push([
+            "bet_id","market","outcome","side","shares","amount_in","avg_price","mkt_p_win","close_date","created"
+          ].join(","));
+
+          document.querySelectorAll("tr[data-betid]").forEach(tr => {
+            const betId = tr.dataset.betid;
+            const market = (tr.dataset.title || "").replace(/,/g, " ");
+            const outcome = (tr.dataset.outcome || "").replace(/,/g, " ");
+            const side = (tr.dataset.side || "");
+            const tds = tr.querySelectorAll("td");
+            const shares = tds[4]?.innerText || "";
+            const amountIn = tds[3]?.innerText || "";
+            const avgPrice = tds[5]?.innerText || "";
+            const mktP = (tds[6]?.innerText || "");
+            const closeDate = (tr.dataset.closedate || "");
+            const created = (tr.dataset.created || "");
+
+            rows.push([
+              betId,
+              `"${market}"`,
+              `"${outcome}"`,
+              side,
+              shares,
+              amountIn,
+              avgPrice,
+              mktP,
+              `"${closeDate}"`,
+              `"${created}"`
+            ].join(","));
+          });
+
+          return rows.join("\n");
+        }
+
+        document.getElementById("copyPromptBtn").onclick = async () => {
+          const csv = buildCSVFromTable();
+          const prompt =
+`You are pricing my open Futuur positions.
+
+Input: CSV rows with columns:
+bet_id,market,outcome,side,shares,amount_in,avg_price,mkt_p_win,close_date,created
+
+Rules:
+- Estimate p_win = probability the POSITION makes money.
+- Use mkt_p_win as the prior.
+- Do not move far without strong reasons.
+- If information is weak, set p_win = mkt_p_win.
+- Longshots (<=0.10): be skeptical.
+- Near expiry: reduce deviation from market.
+
+Output:
+JSON only.
+Mapping: bet_id -> p_win in [0,1].
+No commentary.
+
+CSV:
+${csv}
+`;
+          await navigator.clipboard.writeText(prompt);
+          alert("ChatGPT prompt copied to clipboard");
+        };
       </script>
 
     </main>
@@ -925,7 +1068,7 @@ def portfolio() -> str:
         open_err=open_err,
         closed_err=closed_err,
         orders_err=orders_err,
-        open_bets_sorted=open_rows_sorted,
+        open_bets_sorted=open_bets_sorted,
         open_orders_sorted=open_orders_sorted,
         closed_bets_sorted=closed_bets_sorted,
         request_args=request_args,
@@ -936,14 +1079,14 @@ def portfolio() -> str:
         sort_orders=sort_orders,
         dir_orders=dir_orders,
         sort_url=sort_url,
+        dp_thresh=dp_thresh,
+        top5=top5,
     )
 
 
 @app.route("/portfolio/export")
 def export_portfolio_csv() -> Response:
-    bankroll, _, _ = _compute_bankroll()
     pmap = _pmap_from_request()
-
     open_bets, _ = list_open_real_bets(limit=500)
     open_rows, *_ = _calc_open_bets(open_bets, pmap)
 
@@ -960,6 +1103,7 @@ def export_portfolio_csv() -> Response:
         "avg_price",
         "mkt_p_win",
         "your_p_win",
+        "delta_p",
         "mv_value",
         "ev_value",
         "ev_minus_mv",
@@ -979,6 +1123,7 @@ def export_portfolio_csv() -> Response:
             f"{r['avg_price']:.2f}",
             f"{r['market_p_win']:.3f}",
             f"{r['p_input']:.3f}",
+            f"{r['delta_p']:+.3f}",
             f"{r['mv_value']:.2f}",
             f"{r['ev_value']:.2f}",
             f"{r['ev_edge']:.2f}",
