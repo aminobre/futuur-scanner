@@ -48,11 +48,11 @@ class BetRow:
     category_slug: str
     position: str  # 'l' or 's'
     currency: str
-    shares: float
-    amount_invested: float
+    shares: float                 # SIGNED: shorts negative
+    amount_invested: float        # positive cash in (collateral / cost basis)
     avg_price: float
     mark_price: float
-    mark_value: float
+    mark_value: float             # SIGNED: shorts negative
     unrealized_pnl: float
     realized_pnl: float
     status: str  # 'open' or 'closed'
@@ -167,14 +167,12 @@ def fetch_wallet_balance() -> Optional[float]:
 def _extract_outcome_price(outcome: dict) -> float:
     price_val = outcome.get("price")
     if isinstance(price_val, dict):
-        # Prefer USDT/USDC if present
         for k in ("USDT", "USDC"):
             if k in price_val:
                 try:
                     return float(price_val[k])
                 except Exception:
                     pass
-        # Otherwise first numeric
         for v in price_val.values():
             try:
                 return float(v)
@@ -194,7 +192,7 @@ def _map_bet(raw: dict, status_label: str) -> BetRow:
 
     active_purchases = raw.get("active_purchases") or []
     total_amount = 0.0
-    total_shares = 0.0
+    total_shares_abs = 0.0
     currency = None
 
     for p in active_purchases:
@@ -204,20 +202,23 @@ def _map_bet(raw: dict, status_label: str) -> BetRow:
         except Exception:
             continue
         total_amount += amt
-        total_shares += sh
+        total_shares_abs += sh
         if not currency:
             currency = p.get("currency")
 
-    avg_price = (total_amount / total_shares) if total_shares else 0.0
+    avg_price = (total_amount / total_shares_abs) if total_shares_abs else 0.0
 
     mark_price = _extract_outcome_price(outcome)
 
-    # IMPORTANT: keep sign for shorts.
-    shares = total_shares
-    mark_value = shares * mark_price
+    position = (raw.get("position") or "l").lower()
+    signed_shares = total_shares_abs if position == "l" else -total_shares_abs
 
+    # SIGNED MV (shorts negative)
+    mark_value = signed_shares * mark_price
+
+    # Keep this as a basic placeholder; UI computes its own unrealized anyway.
     unrealized_pnl = (mark_value - total_amount) if status_label == "open" else 0.0
-    realized_pnl = 0.0  # not available here
+    realized_pnl = 0.0
 
     last_action = raw.get("last_action") or {}
     created = _parse_dt(last_action.get("created") or raw.get("created"))
@@ -232,9 +233,9 @@ def _map_bet(raw: dict, status_label: str) -> BetRow:
         outcome_title=outcome.get("title") or "",
         category_title=category.get("title") or "",
         category_slug=category.get("slug") or "",
-        position=raw.get("position") or "l",
+        position=position,
         currency=currency or q.get("canonical_currency") or "",
-        shares=shares,
+        shares=signed_shares,
         amount_invested=total_amount,
         avg_price=avg_price,
         mark_price=mark_price,
@@ -287,7 +288,7 @@ def list_closed_real_bets(limit: int = 200, offset: int = 0) -> Tuple[List[BetRo
     return rows, None
 
 
-# ---------- open limit orders (THIS FIXES YOUR ISSUE) ----------
+# ---------- open limit orders (user-scoped only) ----------
 
 
 def list_open_limit_orders(limit: int = 200, offset: int = 0) -> Tuple[List[LimitOrderRow], Optional[str]]:
@@ -301,11 +302,8 @@ def list_open_limit_orders(limit: int = 200, offset: int = 0) -> Tuple[List[Limi
         "status": "open",
         "limit": limit,
         "offset": offset,
-        # IMPORTANT: do NOT filter currency unless you know your orders are only that currency.
-        # Your sample orders were currency=USDT.
     }
 
-    # These are guesses; Futuur may only support some of them.
     candidate_endpoints = [
         ("orders/", base_params),
         ("orders/me/", base_params),
@@ -317,10 +315,6 @@ def list_open_limit_orders(limit: int = 200, offset: int = 0) -> Tuple[List[Limi
     ]
 
     def looks_global(data: object) -> bool:
-        """
-        Heuristic: global books are huge.
-        User order lists are usually small (dozens, maybe a few hundred).
-        """
         if not isinstance(data, dict):
             return False
 
@@ -342,13 +336,8 @@ def list_open_limit_orders(limit: int = 200, offset: int = 0) -> Tuple[List[Limi
         results = data.get("results") or []
         n = len(results) if isinstance(results, list) else 0
 
-        # Hard guardrails:
-        # - if total is massive, it's global.
-        # - if we got near-full pages repeatedly and total missing, also likely global.
         if total is not None and total > 500:
             return True
-
-        # If the response is giving you hundreds of open orders consistently, it’s probably not “just you”.
         if total is None and n >= 300:
             return True
 
@@ -363,7 +352,6 @@ def list_open_limit_orders(limit: int = 200, offset: int = 0) -> Tuple[List[Limi
             errors.append(f"{endpoint}: {e}")
             continue
 
-        # Normalize results
         if isinstance(data, dict):
             results = data.get("results") or []
         elif isinstance(data, list):
@@ -373,11 +361,9 @@ def list_open_limit_orders(limit: int = 200, offset: int = 0) -> Tuple[List[Limi
             continue
 
         if looks_global(data):
-            # reject and continue trying others
             errors.append(f"{endpoint}: looks like GLOBAL order book (rejected)")
             continue
 
-        # Map rows
         rows: List[LimitOrderRow] = []
         for raw in results:
             try:
@@ -416,9 +402,7 @@ def list_open_limit_orders(limit: int = 200, offset: int = 0) -> Tuple[List[Limi
             except Exception as e:
                 errors.append(f"{endpoint}: map error on order {raw.get('id')}: {e}")
 
-        # Accepted endpoint.
         return rows, None
 
-    # If we got here, we refused to show global or all endpoints failed.
     msg = " | ".join(errors[-6:]) if errors else "Could not fetch user open limit orders"
     return [], f"Unable to load YOUR open limit orders safely (refused to display global book). Details: {msg}"

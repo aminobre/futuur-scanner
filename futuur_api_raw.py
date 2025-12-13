@@ -47,9 +47,9 @@ def call_api(
     if auth:
         now_ts = int(datetime.datetime.utcnow().timestamp())
 
-        # SIGNING RULE:
-        # - GET: sign query params (+Key/+Timestamp) and include them in query
-        # - POST/PUT/PATCH: sign payload (+Key/+Timestamp) and include them in payload
+        # Signing rule:
+        # - GET: sign query params (+Key/+Timestamp), include in query
+        # - POST/PUT/PATCH: sign payload (+Key/+Timestamp), include in JSON
         if method == "GET":
             sign_params = dict(params)
             sign_params.setdefault("Key", FUTUUR_PUBLIC_KEY)
