@@ -3,5 +3,4 @@ requests
 gunicorn
 py-futuur-client==1.0.0
 python-dotenv
-poetry add python-dotenv
-uv add python-dotenv
+openai

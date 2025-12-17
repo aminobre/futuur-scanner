@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -15,16 +15,16 @@ class Market:
     slug: str
     domain: str
     category_title: str
-    tags: List[str]
+    tags: list[str]
     is_binary: bool
     s: float  # market-implied probability for this outcome (0–1)
     price: float  # same as s, kept for clarity
     volume_real: float
     volume_play: float
     wagers_count: int
-    bet_end: Optional[datetime]
-    days_to_close: Optional[float]
-    raw: Dict[str, Any] = field(repr=False, default_factory=dict)
+    bet_end: datetime | None
+    days_to_close: float | None
+    raw: dict[str, Any] = field(repr=False, default_factory=dict)
 
 
 @dataclass
@@ -55,17 +55,17 @@ class BetRow:
     position: str  # 'l' or 's'
     currency: str
     total_shares: float
-    avg_entry_price: Optional[float]
+    avg_entry_price: float | None
     last_price: float
     entry_notional: float
     current_notional: float
     realized_pnl: float
     unrealized_pnl: float
-    realized_pct: Optional[float]
-    first_action_at: Optional[datetime]
-    last_action_at: Optional[datetime]
-    raw: Dict[str, Any] = field(repr=False, default_factory=dict)
-    pct_of_bankroll: Optional[float] = None
+    realized_pct: float | None
+    first_action_at: datetime | None
+    last_action_at: datetime | None
+    raw: dict[str, Any] = field(repr=False, default_factory=dict)
+    pct_of_bankroll: float | None = None
 
 
 @dataclass
@@ -83,6 +83,6 @@ class LimitOrderRow:
     remaining_shares: float
     reserved_notional: float
     status: str
-    created: Optional[datetime]
-    expires: Optional[datetime]
-    raw: Dict[str, Any] = field(repr=False, default_factory=dict)
+    created: datetime | None
+    expires: datetime | None
+    raw: dict[str, Any] = field(repr=False, default_factory=dict)

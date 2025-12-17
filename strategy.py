@@ -1,15 +1,6 @@
 from __future__ import annotations
 
-from typing import List
-
-try:
-    # Preferred: user-configurable default
-    from config import DEFAULT_RISK_MODE  # type: ignore
-except Exception:
-    # Safe fallback if config.py doesn't define it yet
-    DEFAULT_RISK_MODE = "half"
-
-
+from config import DEFAULT_RISK_MODE  # type: ignore
 from models import Market, Recommendation
 
 
@@ -76,17 +67,17 @@ def _kelly_no(p: float, s: float) -> float:
 
 
 def build_recommendations(
-    markets: List[Market],
+    markets: list[Market],
     bankroll: float | None = None,  # optional for backward compatibility
     risk_mode: str | None = None,
-) -> List[Recommendation]:
+) -> list[Recommendation]:
     # bankroll currently not used (recommendations are Kelly fractions),
     # but kept in the signature so callers can pass it without breaking.
     _ = bankroll
 
     risk_fraction = risk_mode_from_string(risk_mode)
 
-    recs: List[Recommendation] = []
+    recs: list[Recommendation] = []
 
     for m in markets:
         s = m.s

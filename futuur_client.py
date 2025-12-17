@@ -1,33 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import timezone
+from typing import Any
 
 from config import CURRENCY_MODE, CURRENCY
 from futuur_api_raw import call_api
 from models import Market
+from utils import parse_dt, safe_float as _safe_float
 
 
-def _parse_dt(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        # Example format: 2025-12-10T08:00:00Z
-        if value.endswith("Z"):
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return datetime.fromisoformat(value)
-    except Exception:
-        return None
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return default
-
-
-def _infer_domain(question: Dict[str, Any]) -> str:
+def _infer_domain(question: dict[str, Any]) -> str:
     """Map Futuur categories/tags to our coarse domains."""
     category = (question.get("category") or {}).get("title", "") or ""
     cat_slug = (question.get("category") or {}).get("slug", "") or ""
@@ -49,7 +31,7 @@ def _infer_domain(question: Dict[str, Any]) -> str:
     return "Other"
 
 
-def _extract_price(outcome: Dict[str, Any]) -> float:
+def _extract_price(outcome: dict[str, Any]) -> float:
     price = outcome.get("price")
     if isinstance(price, dict):
         # Use canonical CURRENCY if present, otherwise first value.
@@ -66,12 +48,12 @@ def get_markets(
     limit: int = 200,
     offset: int = 0,
     ordering: str = "-created_on",
-) -> List[Market]:
+) -> list[Market]:
     """
     Fetch a flat list of outcome-level markets.
     Each Futuur question with N outcomes becomes N Market rows.
     """
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "currency_mode": CURRENCY_MODE,
         "limit": limit,
         "offset": offset,
@@ -86,12 +68,12 @@ def get_markets(
     if not isinstance(results, list):
         return []
 
-    markets: List[Market] = []
+    markets: list[Market] = []
     now = datetime.now(timezone.utc)
 
     for q in results:
-        bet_end = _parse_dt(q.get("bet_end_date"))
-        days_to_close: Optional[float] = None
+        bet_end = parse_dt(q.get("bet_end_date"))
+        days_to_close: float | None = None
         if bet_end is not None:
             delta = (bet_end - now).total_seconds()
             days_to_close = delta / 86400.0

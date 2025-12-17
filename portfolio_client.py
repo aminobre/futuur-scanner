@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple
@@ -7,25 +9,9 @@ from typing import List, Optional, Tuple
 from requests import HTTPError
 
 from futuur_api_raw import call_api
+from utils import parse_dt
 
-
-# ---------- date helpers ----------
-
-
-def _parse_dt(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        v = value.strip()
-        if v.endswith("Z"):
-            v = v[:-1] + "+00:00"
-        return datetime.fromisoformat(v)
-    except Exception:
-        pass
-    try:
-        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z")
-    except Exception:
-        return None
+logger = logging.getLogger(__name__)
 
 
 def _fmt_dt(dt: Optional[datetime]) -> str:
@@ -107,13 +93,16 @@ class LimitOrderRow:
 
 
 def _fetch_me() -> Optional[dict]:
+    import logging
+    logger = logging.getLogger(__name__)
+    
     try:
         data = call_api("me/", params=None, method="GET", auth=True)
     except HTTPError as e:
-        print(f"/me/ HTTP error: {e}")
+        logger.error(f"/me/ HTTP error: {e}")
         return None
     except Exception as e:
-        print(f"/me/ unexpected error: {e}")
+        logger.error(f"/me/ unexpected error: {e}", exc_info=True)
         return None
 
     if not isinstance(data, list) or not data or not isinstance(data[0], dict):
@@ -221,9 +210,9 @@ def _map_bet(raw: dict, status_label: str) -> BetRow:
     realized_pnl = 0.0
 
     last_action = raw.get("last_action") or {}
-    created = _parse_dt(last_action.get("created") or raw.get("created"))
+    created = parse_dt(last_action.get("created") or raw.get("created"))
     closed_dt = created if status_label == "closed" else None
-    close_date = _parse_dt(q.get("bet_end_date"))
+    close_date = parse_dt(q.get("bet_end_date"))
 
     return BetRow(
         bet_id=raw.get("id"),
@@ -266,7 +255,7 @@ def list_open_real_bets(limit: int = 200, offset: int = 0) -> Tuple[List[BetRow]
         try:
             rows.append(_map_bet(raw, status_label="open"))
         except Exception as e:
-            print(f"Error mapping open bet {raw.get('id')}: {e}")
+            logger.warning(f"Error mapping open bet {raw.get('id')}: {e}", exc_info=True)
     return rows, None
 
 
@@ -284,7 +273,7 @@ def list_closed_real_bets(limit: int = 200, offset: int = 0) -> Tuple[List[BetRo
         try:
             rows.append(_map_bet(raw, status_label="closed"))
         except Exception as e:
-            print(f"Error mapping closed bet {raw.get('id')}: {e}")
+            logger.warning(f"Error mapping closed bet {raw.get('id')}: {e}", exc_info=True)
     return rows, None
 
 
@@ -395,8 +384,8 @@ def list_open_limit_orders(limit: int = 200, offset: int = 0) -> Tuple[List[Limi
                         reserved_notional=reserved_notional,
                         currency=raw.get("currency") or "",
                         status=raw.get("status") or "",
-                        created=_parse_dt(raw.get("created")),
-                        expired_at=_parse_dt(raw.get("expired_at")),
+                        created=parse_dt(raw.get("created")),
+                        expired_at=parse_dt(raw.get("expired_at")),
                     )
                 )
             except Exception as e:
